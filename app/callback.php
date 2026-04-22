@@ -1,11 +1,6 @@
 <?php
 session_start();
-require_once 'config.php';
-require_once 'jwks_cache.php';
-require_once 'vendor/autoload.php';
-
-use Firebase\JWT\JWT;
-use Firebase\JWT\JWK;
+require_once 'auth.php';
 
 // 1. Validazione state (protezione CSRF)
 if (empty($_GET['state']) || $_GET['state'] !== ($_SESSION['oauth_state'] ?? '')) {
@@ -41,23 +36,12 @@ if (empty($tokens['access_token'])) {
     die('Errore nello scambio del token: ' . htmlspecialchars($response));
 }
 
-// 3. Verifica firma JWT
-$jwks = getJwks();
+// 3. Verifica firma JWT e salva in sessione
 try {
-    $payload = JWT::decode($tokens['access_token'], JWK::parseKeySet($jwks));
+    storeSession($tokens);
 } catch (Exception $e) {
     die('Token JWT non valido: ' . htmlspecialchars($e->getMessage()));
 }
-
-// 4. Salva in sessione e redirect
-$_SESSION['kc_user'] = [
-    'username'  => $payload->preferred_username ?? '',
-    'name'      => $payload->name ?? '',
-    'email'     => $payload->email ?? '',
-    'roles'     => $payload->realm_access->roles ?? [],
-    'exp'       => $payload->exp ?? 0,
-];
-$_SESSION['kc_id_token'] = $tokens['id_token'] ?? '';
 
 header('Location: dashboard.php');
 exit;

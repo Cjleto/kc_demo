@@ -1,10 +1,6 @@
 <?php
-session_start();
-if (empty($_SESSION['kc_user'])) {
-    header('Location: index.php');
-    exit;
-}
-$user = $_SESSION['kc_user'];
+require_once 'auth.php';
+$user  = requireAuth();
 $roles = array_filter($user['roles'], fn($r) => !in_array($r, ['offline_access', 'uma_authorization']));
 ?>
 <!DOCTYPE html>
@@ -18,7 +14,7 @@ $roles = array_filter($user['roles'], fn($r) => !in_array($r, ['offline_access',
   <tr><th>Nome</th><td><?= htmlspecialchars($user['name']) ?></td></tr>
   <tr><th>Email</th><td><?= htmlspecialchars($user['email']) ?></td></tr>
   <tr><th>Ruoli</th><td><?= htmlspecialchars(implode(', ', $roles)) ?></td></tr>
-  <tr><th>Token scade</th><td><?= date('H:i:s', $user['exp']) ?></td></tr>
+  <tr><th>Token scade alle</th><td><?= date('H:i:s', $_SESSION['kc_exp']) ?></td></tr>
 </table>
 
 <br>

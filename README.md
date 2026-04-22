@@ -84,6 +84,29 @@ kc_farc/
 
 ---
 
+## Aggiungere nuove pagine protette
+
+Ogni pagina che richiede autenticazione deve iniziare con:
+
+```php
+<?php
+require_once 'auth.php';
+$user = requireAuth();
+
+// Da qui $user è garantito valido:
+// $user['username'], $user['name'], $user['email'], $user['roles']
+```
+
+`requireAuth()` gestisce automaticamente:
+
+| Situazione | Comportamento |
+|---|---|
+| Sessione assente | Redirect a `login.php` |
+| Access token scaduto (default: 5 min) | Refresh silenzioso con Keycloak |
+| Refresh token scaduto (default: 30 min) | Sessione distrutta + redirect a `login.php` |
+
+---
+
 ## Debug con VS Code
 
 1. Installa l'estensione **PHP Debug** (`xdebug.php-debug`)
