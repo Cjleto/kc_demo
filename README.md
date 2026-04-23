@@ -104,6 +104,29 @@ $user = requireAuth();
 | Sessione assente | Redirect a `login.php` |
 | Access token scaduto (default: 5 min) | Refresh silenzioso con Keycloak |
 | Refresh token scaduto (default: 30 min) | Sessione distrutta + redirect a `login.php` |
+| Refresh token revocato da KC | Sessione distrutta + redirect a `login.php` |
+
+### Come funziona il refresh
+
+Quando l'access token scade, `requireAuth()` chiama Keycloak con il refresh token:
+
+```
+PHP (tua app)                    Keycloak
+      |                               |
+      |── POST /token ────────────────→|
+      |   grant_type=refresh_token    | verifica refresh_token
+      |   refresh_token=eyJ...        | non scaduto? ✅
+      |                               | genera nuova coppia
+      |←── access_token (nuovo) ──────|
+      |    refresh_token (nuovo)      |
+      |                               |
+      | aggiorna sessione             |
+```
+
+Note importanti:
+- **Il refresh token viene ruotato**: KC ne emette uno nuovo ad ogni refresh, quello vecchio viene invalidato immediatamente.
+- **Se il refresh token è scaduto**: KC risponde `invalid_grant` → l'utente deve rifare il login.
+- **Se l'admin revoca la sessione** dalla console KC (o l'utente fa logout da un altro dispositivo): KC risponde `invalid_grant` → stesso comportamento.
 
 ---
 

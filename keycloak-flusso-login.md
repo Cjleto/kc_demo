@@ -232,6 +232,147 @@ BROWSER              NOSTRA APP              KEYCLOAK
 
 ---
 
+# Keycloak — Modifiche utente in corso di sessione
+
+## Il problema
+
+Il token JWT che hai in sessione è **statico** — viene generato al momento del login e non si aggiorna da solo.
+
+```
+Utente fa login → token generato con roles: ["customer"]
+
+Admin su KC cambia l'utente:
+  - aggiunge ruolo "admin"
+  - oppure disabilita l'account
+  - oppure cambia l'email
+
+Il token in sessione dice ancora roles: ["customer"] ❌
+La tua app non sa nulla delle modifiche
+```
+
+---
+
+## Le soluzioni possibili
+
+### Soluzione 1 — Accetti il ritardo _(più comune)_
+
+Il token ha una scadenza breve (default KC: 5 minuti). Quando scade, il refresh token ne genera uno nuovo con i dati aggiornati da KC.
+
+```
+Modifica su KC → entro max 5 minuti il nuovo token rifletterà i cambiamenti
+```
+
+Per la maggior parte dei casi è accettabile. I cambi di ruolo non sono operazioni urgenti al secondo.
+
+---
+
+### Soluzione 2 — Riduci la durata del token
+
+In KC puoi abbassare l'`Access Token Lifespan` a 1-2 minuti:
+
+```
+Admin Console → Realm Settings → Tokens → Access Token Lifespan
+```
+
+Più bassa è la durata, più frequente è il refresh, più i dati sono aggiornati.  
+⚠️ Aumenta il carico di chiamate a KC.
+
+---
+
+### Soluzione 3 — Backchannel Logout _(la più corretta)_
+
+KC supporta un meccanismo per cui quando un utente viene disabilitato o modificato, KC chiama direttamente la tua app su un endpoint dedicato per invalidare la sessione.
+
+```
+Admin disabilita utente su KC
+        ↓
+KC fa una POST alla tua app:
+POST https://mia-app.test/backchannel-logout
+  logout_token=eyJ...
+
+La tua app riceve la notifica e distrugge la sessione
+```
+
+**Configurazione in KC:**
+
+```
+Clients → local-client-1 → Settings
+→ Backchannel logout URL:              https://mia-app.test/backchannel-logout
+→ Backchannel logout session required: ON
+```
+
+**Endpoint nella tua app:**
+
+```php
+// backchannel-logout.php
+
+$logoutToken = $_POST['logout_token'] ?? '';
+
+// Decodifica il logout token (anche questo è un JWT firmato da KC)
+$payload = JWT::decode($logoutToken, JWK::parseKeySet($jwks));
+
+// Contiene il session_id dell'utente da invalidare
+$sessionId = $payload->sid;
+
+// Trova e distruggi la sessione PHP corrispondente
+// Devi aver salvato il sid KC in sessione al momento del login
+session_id(cercaSessioneDaSid($sessionId));
+session_start();
+session_destroy();
+
+http_response_code(200);
+```
+
+> Il `sid` è il **session ID di KC** — va salvato in `$_SESSION` al momento del login
+> così da poter risalire alla sessione PHP da invalidare quando arriva la notifica.
+
+---
+
+### Soluzione 4 — Token Introspection _(più pesante)_
+
+Ad ogni richiesta chiedi a KC se il token è ancora valido:
+
+```php
+// auth_check.php — ad ogni pagina protetta
+
+$response = file_get_contents('http://keycloak-host/realms/Fonarcom/protocol/openid-connect/token/introspect', false,
+    stream_context_create(['http' => [
+        'method'  => 'POST',
+        'header'  => 'Content-Type: application/x-www-form-urlencoded',
+        'content' => http_build_query([
+            'token'         => $_SESSION['kc_access_token'],
+            'client_id'     => 'local-client-1',
+            'client_secret' => 'il-tuo-secret',
+        ]),
+    ]])
+);
+
+$data = json_decode($response, true);
+
+if (!$data['active']) {
+    // Token revocato o utente disabilitato su KC
+    session_destroy();
+    header('Location: /login.php');
+    exit;
+}
+```
+
+KC risponde con `active: true/false` e i dati aggiornati dell'utente in tempo reale.  
+⚠️ È una chiamata HTTP ad ogni richiesta — in produzione con traffico alto diventa un collo di bottiglia.
+
+---
+
+## Quale scegliere
+
+| Scenario | Soluzione consigliata |
+|---|---|
+| Modifiche ruoli non urgenti | Token breve (1-2 min) + refresh |
+| Disabilitazione account immediata | Backchannel logout |
+| Massima sicurezza, traffico basso | Introspection |
+| App semplice, contesto interno | Accetti il ritardo dei 5 minuti |
+
+Per un'app legacy PHP in contesto interno, la combinazione **token breve + backchannel logout** copre il 95% dei casi senza overhead eccessivo.
+
 ## Riferimenti
 
 - Keycloak Admin Console: `http://keycloak-host:8080`
