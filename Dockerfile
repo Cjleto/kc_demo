@@ -9,6 +9,7 @@ RUN apt-get update && apt-get install -y unzip curl libcurl4-openssl-dev \
     && rm composer-setup.php
 
 COPY xdebug.ini /usr/local/etc/php/conf.d/xdebug.ini
+COPY php.ini /usr/local/etc/php/conf.d/php.ini
 
 WORKDIR /var/www/html
 
