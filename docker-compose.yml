@@ -3,6 +3,8 @@ services:
   postgres:
     image: postgres:16-alpine
     container_name: keycloak_db
+    ports:
+      - "5432:5432"
     environment:
       POSTGRES_DB: keycloak
       POSTGRES_USER: keycloak
