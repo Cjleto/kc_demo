@@ -4,6 +4,120 @@ Demo del flusso **Authorization Code Flow** (OAuth 2.0 + OpenID Connect) con Key
 
 ---
 
+## Flusso di autenticazione — OIDC Authorization Code Flow
+
+**Protocollo:** OpenID Connect 1.0 sopra OAuth 2.0 Authorization Code Flow — il flusso più sicuro per applicazioni web con backend.
+
+| Aspetto | Dettaglio |
+|---|---|
+| **Protocollo base** | OAuth 2.0 Authorization Code Flow |
+| **Strato identità** | OpenID Connect — scope `openid` + `id_token` |
+| **Algoritmo firma JWT** | RS256 (asimmetrico, chiave pubblica via JWKS) |
+| **CSRF protection** | Parametro `state` random, verificato in `callback.php` |
+| **Client authentication** | `client_secret` (Confidential Client — il secret non esce mai dal browser) |
+| **Token exchange** | Server-to-server via Docker network interno (`keycloak:8080`) |
+| **JWKS caching** | Cache locale filesystem TTL 1 ora |
+| **Refresh proattivo** | 30 secondi prima della scadenza (`exp - 30`) |
+| **Logout** | OIDC RP-Initiated Logout con `id_token_hint` |
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Browser
+    participant App as PHP App<br/>(localhost:8081)
+    participant KC as Keycloak<br/>(localhost:8080 / keycloak:8080)
+    participant Cache as JWKS Cache<br/>(filesystem /tmp)
+
+    Note over Browser,KC: ── PROTOCOLLO: OpenID Connect (OIDC) su OAuth 2.0 Authorization Code Flow ──
+
+    rect rgb(230, 240, 255)
+        Note over Browser,KC: FASE 1 — Avvio login (login.php)
+        Browser->>App: GET /dashboard.php (pagina protetta)
+        App->>App: requireAuth() → sessione vuota
+        App-->>Browser: 302 Redirect → /login.php
+
+        Browser->>App: GET /login.php
+        App->>App: genera state = random_bytes(16)<br/>salva $_SESSION['oauth_state']
+        App-->>Browser: 302 Redirect → Keycloak /auth<br/>?client_id=local-client-1<br/>&redirect_uri=http://localhost:8081/callback.php<br/>&response_type=code<br/>&scope=openid profile email roles<br/>&state={state}
+    end
+
+    rect rgb(255, 245, 220)
+        Note over Browser,KC: FASE 2 — Autenticazione su Keycloak
+        Browser->>KC: GET /realms/Fonarcom/protocol/openid-connect/auth?...
+        KC-->>Browser: 200 OK — Form di login HTML
+
+        Browser->>KC: POST credenziali (username + password)
+        KC->>KC: valida credenziali<br/>genera authorization code (one-time, short-lived)
+        KC-->>Browser: 302 Redirect → /callback.php<br/>?code={authorization_code}<br/>&state={state}
+    end
+
+    rect rgb(220, 255, 230)
+        Note over Browser,KC: FASE 3 — Scambio code → token (callback.php) [server-to-server]
+        Browser->>App: GET /callback.php?code={code}&state={state}
+
+        App->>App: verifica state == $_SESSION['oauth_state']<br/>⚠ CSRF protection — mismatch → errore 400
+
+        App->>KC: POST /realms/Fonarcom/protocol/openid-connect/token<br/>(via Docker network: keycloak:8080)<br/>grant_type=authorization_code<br/>code={code}<br/>client_id=local-client-1<br/>client_secret={secret}<br/>redirect_uri=http://localhost:8081/callback.php
+        KC->>KC: valida code + client_secret<br/>code è monouso → lo invalida
+        KC-->>App: 200 JSON {<br/>  access_token: {JWT},<br/>  refresh_token: {opaque/JWT},<br/>  id_token: {JWT},<br/>  expires_in: 300<br/>}
+    end
+
+    rect rgb(255, 225, 225)
+        Note over Browser,Cache: FASE 4 — Verifica firma JWT + store sessione
+        App->>Cache: getJwks() — cache valida? (TTL 1h)
+        alt cache HIT (< 1 ora)
+            Cache-->>App: JWKS da file /tmp/jwks_cache.json
+        else cache MISS o scaduta
+            App->>KC: GET /realms/Fonarcom/protocol/openid-connect/certs<br/>(via Docker network: keycloak:8080)
+            KC-->>App: 200 JSON — JWKS (chiavi pubbliche RS256)
+            App->>Cache: salva JWKS su /tmp/jwks_cache.json
+            Cache-->>App: OK
+        end
+
+        App->>App: JWT::decode(access_token, JWKS)<br/>verifica: firma RS256, exp, iss, aud<br/>estrae: preferred_username, name, email,<br/>realm_access.roles, exp
+
+        App->>App: $_SESSION = {<br/>  kc_user: {username, name, email, roles},<br/>  kc_exp: {unix timestamp},<br/>  kc_access_token, kc_refresh_token, kc_id_token<br/>}
+
+        App-->>Browser: 302 Redirect → /dashboard.php
+        Browser->>App: GET /dashboard.php
+        App->>App: requireAuth() → sessione valida ✓
+        App-->>Browser: 200 OK — pagina dashboard
+    end
+
+    rect rgb(240, 230, 255)
+        Note over Browser,KC: FASE 5 — Refresh automatico (ogni richiesta a pagina protetta)
+        Browser->>App: GET /dashboard.php (richiesta successiva)
+        App->>App: requireAuth()<br/>time() >= kc_exp - 30 ?<br/>(anticipa refresh di 30s)
+        alt token scaduto o in scadenza
+            App->>KC: POST /realms/Fonarcom/protocol/openid-connect/token<br/>grant_type=refresh_token<br/>refresh_token={refresh_token}<br/>client_id + client_secret
+            alt refresh token valido
+                KC-->>App: 200 JSON — nuovi access_token + refresh_token
+                App->>App: _storeSession() → aggiorna sessione
+                App-->>Browser: 200 OK — pagina servita
+            else refresh token scaduto/revocato
+                KC-->>App: 400 invalid_grant
+                App->>App: session_destroy()
+                App-->>Browser: 302 Redirect → /login.php
+            end
+        else token ancora valido
+            App-->>Browser: 200 OK — usa sessione esistente
+        end
+    end
+
+    rect rgb(240, 240, 240)
+        Note over Browser,KC: FASE 6 — Logout (logout.php)
+        Browser->>App: GET /logout.php
+        App->>App: salva kc_id_token dalla sessione<br/>session_destroy()
+        App-->>Browser: 302 Redirect → Keycloak /logout<br/>?id_token_hint={id_token}<br/>&post_logout_redirect_uri=http://localhost:8081/
+        Browser->>KC: GET /realms/Fonarcom/protocol/openid-connect/logout?...
+        KC->>KC: invalida sessione SSO<br/>verifica id_token_hint
+        KC-->>Browser: 302 Redirect → http://localhost:8081/
+        Browser->>App: GET /
+    end
+```
+
+---
+
 ## Prerequisiti
 
 - [Docker Desktop](https://www.docker.com/products/docker-desktop/)
@@ -71,6 +185,61 @@ docker exec keycloak /opt/keycloak/bin/kcadm.sh create users -r Fonarcom \
 docker exec keycloak /opt/keycloak/bin/kcadm.sh set-password -r Fonarcom \
   --username testuser --new-password password
 ```
+
+---
+
+## Service account per la Admin REST API
+
+Per chiamare la KC Admin REST API da server (es. user provisioning) serve un client con **Service Accounts** abilitato. Il service account ottiene un access token via `client_credentials` grant — nessun utente coinvolto.
+
+### Creazione con `kcadm.sh`
+
+```bash
+# 1. Crea il client con service accounts abilitati
+docker exec keycloak /opt/keycloak/bin/kcadm.sh create clients -r Fonarcom \
+  -s clientId=farc-admin-sa \
+  -s enabled=true \
+  -s publicClient=false \
+  -s serviceAccountsEnabled=true \
+  -s clientAuthenticatorType=client-secret
+
+# 2. Recupera l'UUID interno del client appena creato
+docker exec keycloak /opt/keycloak/bin/kcadm.sh get clients -r Fonarcom \
+  -q clientId=farc-admin-sa --fields id,clientId
+
+# 3. Leggi il secret generato automaticamente (sostituisci {CLIENT_UUID} con il valore del passo 2)
+docker exec keycloak /opt/keycloak/bin/kcadm.sh get \
+  clients/{CLIENT_UUID}/client-secret -r Fonarcom
+
+# 4. Assegna il ruolo manage-users al service account
+#    (il nome utente del SA è sempre service-account-{clientId})
+docker exec keycloak /opt/keycloak/bin/kcadm.sh add-roles -r Fonarcom \
+  --uusername service-account-farc-admin-sa \
+  --cclientid realm-management \
+  --rolename manage-users
+```
+
+### Valori da copiare nella configurazione
+
+| Costante | Valore |
+|---|---|
+| `KC_ADMIN_CLIENT_ID` | `farc-admin-sa` (il clientId scelto sopra) |
+| `KC_ADMIN_CLIENT_SECRET` | Il valore restituito dal passo 3 (`"value": "..."`) |
+
+### Verifica
+
+```bash
+# Ottieni un token e verifica che risponda con un JWT
+curl -s -X POST http://localhost:8080/realms/Fonarcom/protocol/openid-connect/token \
+  -d "grant_type=client_credentials" \
+  -d "client_id=farc-admin-sa" \
+  -d "client_secret=IL_TUO_SECRET" \
+  | python3 -m json.tool | grep access_token
+```
+
+### Perché un client separato
+
+Il client OIDC (`local-client-1`) è **public** (nessun secret) — è pensato per i redirect browser dell'utente finale. Il service account richiede un client **confidential** (con secret) e non interagisce mai con il browser. Tenerli separati limita i permessi: il client OIDC non ha accesso all'Admin API.
 
 ---
 
